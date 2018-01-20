@@ -1,0 +1,152 @@
+Parameters:
+  CodePipelineBucket:
+    Type: String
+    Description: codepipeline artifacts store for this account/region
+
+  GithubOwner:
+    Type: String
+    Description: the owner of the github account (source)
+  
+  GithubRepoName:
+    Type: String
+    Description: name of the github repo
+
+  GithubPersonalAccessToken:
+    Type: String
+    Description: instructions http://docs.aws.amazon.com/codepipeline/latest/userguide/pipelines-edit.html
+
+Resources:
+
+  CodePipeline:
+    Type: "AWS::CodePipeline::Pipeline"
+    Properties:
+      ArtifactStore:
+        Location: !Ref CodePipelineBucket
+        Type: S3
+      Name: !Ref AWS::StackName
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      Stages:
+        -
+          Name: SourceGithub
+          Actions:
+            - 
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: 1
+              Configuration:
+                Owner: !Ref GithubOwner
+                Repo: !Ref GithubRepoName 
+                PollForSourceChanges: true
+                Branch: master
+                OAuthToken: !Ref GithubPersonalAccessToken
+              Name: Source
+              RunOrder: 1
+              OutputArtifacts:
+                - Name: clonedSource
+        -
+          Name: build
+          Actions:
+            - 
+              InputArtifacts:
+                - Name: clonedSource
+              ActionTypeId:
+                Category: Build
+                Owner: AWS 
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName: !Sub ${AWS::StackName}
+              Name: CodeBuild
+              RunOrder: 2
+
+  CodeBuild:
+    Type: "AWS::CodeBuild::Project"
+    Properties: 
+      Artifacts:
+        Type: CODEPIPELINE
+      BadgeEnabled: true
+      Description: !Sub build stage for ${AWS::StackName}
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/java:openjdk-8
+      Name: !Sub build-${AWS::StackName}
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Source:
+        BuildSpec: buildspec.yml
+        Type: CODEPIPELINE
+    
+
+  CodePipelineRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "codepipeline.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "inline-policy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                Resource: "*"
+              -
+                Effect: "Allow"
+                Action:
+                  - s3:*
+                Resource: 
+                  - !Sub arn:aws:s3:::${CodePipelineBucket}
+                  - !Sub arn:aws:s3:::${CodePipelineBucket}/*
+
+  CodeBuildRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "codebuild.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "inline-policy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${AWS::StackName}
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${AWS::StackName}:*
+              -
+                Effect: "Allow"
+                Action:
+                  - s3:*
+                Resource: 
+                  - !Sub arn:aws:s3:::${CodePipelineBucket}
+                  - !Sub arn:aws:s3:::${CodePipelineBucket}/*
+              
