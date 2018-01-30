@@ -1,7 +1,4 @@
 Parameters:
-  CodePipelineBucket:
-    Type: String
-    Description: codepipeline artifacts store for this account/region
 
   GithubOwner:
     Type: String
@@ -17,11 +14,14 @@ Parameters:
 
 Resources:
 
+  WorkBucket:
+    Type: "AWS::S3::Bucket"
+
   CodePipeline:
     Type: "AWS::CodePipeline::Pipeline"
     Properties:
       ArtifactStore:
-        Location: !Ref CodePipelineBucket
+        Location: !Ref WorkBucket
         Type: S3
       Name: !Ref AWS::StackName
       RoleArn: !GetAtt CodePipelineRole.Arn
@@ -30,6 +30,7 @@ Resources:
           Name: SourceGithub
           Actions:
             - 
+              Name: source
               ActionTypeId:
                 Category: Source
                 Owner: ThirdParty
@@ -41,24 +42,57 @@ Resources:
                 PollForSourceChanges: true
                 Branch: master
                 OAuthToken: !Ref GithubPersonalAccessToken
-              Name: Source
               RunOrder: 1
               OutputArtifacts:
-                - Name: clonedSource
+                - Name: sourceOutput
         -
           Name: build
           Actions:
             - 
+              Name: codebuild
               InputArtifacts:
-                - Name: clonedSource
+                - Name: sourceOutput
               ActionTypeId:
                 Category: Build
                 Owner: AWS 
                 Provider: CodeBuild
                 Version: 1
               Configuration:
-                ProjectName: !Sub ${AWS::StackName}
-              Name: CodeBuild
+                ProjectName: !Sub build-${AWS::StackName}
+              RunOrder: 1
+              OutputArtifacts:
+                - Name: buildOutput
+        -
+          Name: Cloudformation
+          Actions:
+            - 
+              Name: create_or_update_changeset
+              InputArtifacts:
+                - Name: buildOutput
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS 
+                Provider: CloudFormation
+                Version: 1
+              Configuration:
+                ActionMode: CHANGE_SET_REPLACE
+                ChangeSetName: !Sub ${AWS::StackName}-changeset
+                RoleArn: !GetAtt CloudFormationDeployRole.Arn
+                Capabilities: CAPABILITY_IAM
+                StackName: !Sub ${AWS::StackName}-deploy
+                TemplatePath: buildOutput::newCloudformation.yml
+              RunOrder: 1
+            - 
+              Name: execute_changeset
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS 
+                Provider: CloudFormation
+                Version: 1
+              Configuration:
+                ActionMode: CHANGE_SET_EXECUTE
+                StackName: !Sub ${AWS::StackName}-deploy
+                ChangeSetName: !Sub ${AWS::StackName}-changeset
               RunOrder: 2
 
   CodeBuild:
@@ -67,15 +101,36 @@ Resources:
       Artifacts:
         Type: CODEPIPELINE
       BadgeEnabled: true
+      Cache: 
+        Location: !Sub ${WorkBucket}/cache
+        Type: S3
       Description: !Sub build stage for ${AWS::StackName}
       Environment:
         Type: LINUX_CONTAINER
         ComputeType: BUILD_GENERAL1_SMALL
         Image: aws/codebuild/java:openjdk-8
+        EnvironmentVariables:
+          -
+            Name: WORK_BUCKET
+            Value: !Ref WorkBucket
       Name: !Sub build-${AWS::StackName}
       ServiceRole: !GetAtt CodeBuildRole.Arn
       Source:
-        BuildSpec: buildspec.yml
+        BuildSpec: | 
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - aws cloudformation package 
+                    --template-file cloudformation.yml 
+                    --s3-bucket ${WORK_BUCKET}
+                    --output-template-file newCloudformation.yml
+          artifacts:
+            files:
+              - ./newCloudformation.yml
+          cache:
+            paths:
+              - '/root/.m2/**/*'
         Type: CODEPIPELINE
     
 
@@ -110,9 +165,26 @@ Resources:
                 Action:
                   - s3:*
                 Resource: 
-                  - !Sub arn:aws:s3:::${CodePipelineBucket}
-                  - !Sub arn:aws:s3:::${CodePipelineBucket}/*
-
+                  - !Sub arn:aws:s3:::${WorkBucket}
+                  - !Sub arn:aws:s3:::${WorkBucket}/*
+              -
+                Effect: "Allow"
+                Action:
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:ExecuteChangeSet
+                Resource:
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}-deploy/*
+              -
+                Effect: "Allow"
+                Action:
+                  - iam:PassRole   
+                Resource:
+                  - !GetAtt CloudFormationDeployRole.Arn
+                                
+                  
   CodeBuildRole:
     Type: "AWS::IAM::Role"
     Properties:
@@ -140,13 +212,51 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: 
-                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${AWS::StackName}
-                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${AWS::StackName}:*
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/build-${AWS::StackName}
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/build-${AWS::StackName}:*
               -
                 Effect: "Allow"
                 Action:
                   - s3:*
                 Resource: 
-                  - !Sub arn:aws:s3:::${CodePipelineBucket}
-                  - !Sub arn:aws:s3:::${CodePipelineBucket}/*
+                  - !Sub arn:aws:s3:::${WorkBucket}
+                  - !Sub arn:aws:s3:::${WorkBucket}/*
+             
+
+
+  CloudFormationDeployRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "cloudformation.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "inline-policy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - lambda:*
+                  - iam:*
+                  - s3:*
+                Resource: 
+                  - "*"
+              -
+                Effect: "Allow"
+                Action:
+                  - cloudformation:CreateChangeSet
+                Resource: 
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31
+                  
               
