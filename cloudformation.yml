@@ -121,6 +121,7 @@ Resources:
           phases:
             install:
               commands:
+                - mvn package
                 - aws cloudformation package 
                     --template-file cloudformation.yml 
                     --s3-bucket ${WORK_BUCKET}
