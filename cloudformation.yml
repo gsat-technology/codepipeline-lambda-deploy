@@ -11,6 +11,10 @@ Parameters:
   GithubPersonalAccessToken:
     Type: String
     Description: instructions http://docs.aws.amazon.com/codepipeline/latest/userguide/pipelines-edit.html
+  
+  TestScript:
+    Type: String
+    Description: path to your test script in the nominated repo
 
 Resources:
 
@@ -94,8 +98,24 @@ Resources:
                 StackName: !Sub ${AWS::StackName}-deploy
                 ChangeSetName: !Sub ${AWS::StackName}-changeset
               RunOrder: 2
+        -
+          Name: test
+          Actions:
+            - 
+              Name: lambdaTest
+              InputArtifacts:
+                - Name: sourceOutput
+              ActionTypeId:
+                Category: Test
+                Owner: AWS 
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName: !Sub test-${AWS::StackName}
+              RunOrder: 1
+            
 
-  CodeBuild:
+  CodeBuildBuild:
     Type: "AWS::CodeBuild::Project"
     Properties: 
       Artifacts:
@@ -132,6 +152,40 @@ Resources:
           cache:
             paths:
               - '/root/.m2/**/*'
+        Type: CODEPIPELINE
+
+
+  CodeBuildTest:
+    Type: "AWS::CodeBuild::Project"
+    Properties: 
+      Artifacts:
+        Type: CODEPIPELINE
+      BadgeEnabled: true
+      Description: !Sub test stage for ${AWS::StackName}
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/ubuntu-base:14.04
+        EnvironmentVariables:
+          -
+            Name: TEST_SCRIPT
+            Value: !Ref TestScript
+          -
+            Name: STACK_NAME
+            Value: !Sub ${AWS::StackName}-deploy
+      Name: !Sub test-${AWS::StackName}
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Source:
+        BuildSpec: | 
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - apt-get update
+                - apt-get install -y jq
+                - lambda_name=$(aws cloudformation describe-stack-resources --stack-name ${STACK_NAME} | jq '.StackResources[] | select(.ResourceType == "AWS::Lambda::Function") | .PhysicalResourceId' -r)
+                - chmod u+x ${TEST_SCRIPT}
+                - ./${TEST_SCRIPT} $lambda_name
         Type: CODEPIPELINE
     
 
@@ -213,8 +267,8 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: 
-                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/build-${AWS::StackName}
-                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/build-${AWS::StackName}:*
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*-${AWS::StackName}
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*-${AWS::StackName}:*
               -
                 Effect: "Allow"
                 Action:
@@ -222,7 +276,18 @@ Resources:
                 Resource: 
                   - !Sub arn:aws:s3:::${WorkBucket}
                   - !Sub arn:aws:s3:::${WorkBucket}/*
-             
+              -
+                Effect: "Allow"
+                Action:
+                  - cloudformation:DescribeStackResources
+                Resource: 
+                  - "*"
+              -
+                Effect: "Allow"
+                Action:
+                  - lambda:InvokeFunction
+                Resource: 
+                  - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*
 
 
   CloudFormationDeployRole:
