@@ -120,7 +120,6 @@ Resources:
     Properties: 
       Artifacts:
         Type: CODEPIPELINE
-      BadgeEnabled: true
       Cache: 
         Location: !Sub ${WorkBucket}/cache
         Type: S3
@@ -160,7 +159,6 @@ Resources:
     Properties: 
       Artifacts:
         Type: CODEPIPELINE
-      BadgeEnabled: true
       Description: !Sub test stage for ${AWS::StackName}
       Environment:
         Type: LINUX_CONTAINER
